@@ -1,0 +1,58 @@
+{
+  "users": [
+    {
+      "id": "898b81fa-a8da-4bc2-904e-d9f25630ba17",
+      "username": "test",
+      "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=test",
+      "createdAt": "2026-01-27T18:54:57.868Z"
+    },
+    {
+      "id": "1aba6b29-d3e5-4c08-8f3a-326ceedff7a1",
+      "username": "test2",
+      "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=test2",
+      "createdAt": "2026-01-27T19:06:51.870Z"
+    },
+    {
+      "id": "ded3a1a6-c921-4fc5-a3ec-b9cdfe2b7d44",
+      "username": "test1",
+      "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=test1",
+      "createdAt": "2026-01-27T19:13:06.710Z"
+    }
+  ],
+  "servers": [
+    {
+      "id": "server-1",
+      "name": "Genel Sunucu",
+      "channels": [
+        {
+          "id": "channel-1",
+          "name": "genel",
+          "messages": [
+            {
+              "id": "c1c802fb-f18b-4b3f-b852-b78bac5ef1c7",
+              "content": "test",
+              "user": {
+                "id": "898b81fa-a8da-4bc2-904e-d9f25630ba17",
+                "username": "test",
+                "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=test"
+              },
+              "timestamp": "2026-01-27T18:55:14.290Z"
+            }
+          ]
+        },
+        {
+          "id": "channel-2",
+          "name": "rastgele",
+          "messages": []
+        },
+        {
+          "id": "3d025215-5c7a-478f-9e99-d51c2f05746d",
+          "name": "test",
+          "type": "voice",
+          "messages": [],
+          "createdAt": "2026-01-27T19:13:11.425Z"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "discord-clone",
+  "version": "1.0.0",
+  "description": "Discord clone with real-time messaging",
+  "scripts": {
+    "server": "cd server && npm start",
+    "client": "cd client && npm run dev",
+    "dev": "concurrently \"npm run server\" \"npm run client\""
+  },
+  "keywords": ["discord", "chat", "realtime", "socketio"],
+  "author": "",
+  "license": "MIT",
+  "private": true
+}
