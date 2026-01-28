@@ -7,6 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import dotenv from 'dotenv';
+import VoiceManager from './voiceManager.js';
 
 dotenv.config();
 
@@ -157,6 +158,13 @@ app.get('/api/servers/:serverId/channels/:channelId/messages', (req, res) => {
 const onlineUsers = new Map();
 const voiceChannelUsers = new Map(); // Track users in voice channels
 
+// Initialize Voice Manager
+const voiceManager = new VoiceManager();
+voiceManager.init().catch(err => {
+  console.error('Failed to initialize VoiceManager:', err);
+  process.exit(1);
+});
+
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
@@ -202,61 +210,94 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Voice channel events
-  socket.on('join_voice_channel', ({ channelId, user, peerId }) => {
+  // Voice channel events - mediasoup integration
+  socket.on('join_voice_channel', async ({ channelId, userId }) => {
     socket.join(channelId);
 
+    // Track user in channel (for UI)
     if (!voiceChannelUsers.has(channelId)) {
       voiceChannelUsers.set(channelId, new Map());
     }
 
-    // Store user with peerId
-    voiceChannelUsers.get(channelId).set(socket.id, {
-      ...user,
-      socketId: socket.id,
-      peerId: peerId || socket.id
-    });
-
-    console.log(`User ${user.username} joined voice channel ${channelId}`);
-    console.log(`Channel ${channelId} now has ${voiceChannelUsers.get(channelId).size} users`);
-
-    // Notify others in the channel
-    socket.to(channelId).emit('user_joined_voice', {
-      user: {
+    // Get user info from onlineUsers
+    const user = onlineUsers.get(socket.id);
+    if (user) {
+      voiceChannelUsers.get(channelId).set(socket.id, {
         ...user,
-        socketId: socket.id,
-        peerId: peerId || socket.id
-      }
-    });
-
-    // Send existing users to the new user
-    const existingUsers = Array.from(voiceChannelUsers.get(channelId).values())
-      .filter(u => u.socketId !== socket.id);
-    socket.emit('existing_voice_users', { users: existingUsers });
-
-    // Broadcast ALL voice channel states to ALL clients
-    voiceChannelUsers.forEach((users, chId) => {
-      io.emit('voice_channel_users_update', {
-        channelId: chId,
-        users: Array.from(users.values())
+        socketId: socket.id
       });
-    });
+
+      // Broadcast voice channel users update to ALL clients
+      voiceChannelUsers.forEach((users, chId) => {
+        io.emit('voice_channel_users_update', {
+          channelId: chId,
+          users: Array.from(users.values())
+        });
+      });
+    }
+
+    // Initialize mediasoup session
+    await voiceManager.handleJoinChannel(socket, { channelId, userId });
   });
 
-  socket.on('leave_voice_channel', ({ channelId }) => {
+  // Create WebRTC transport
+  socket.on('create-transport', async ({ channelId, direction }, callback) => {
+    try {
+      const params = await voiceManager.createTransport(socket, { channelId, direction });
+      callback({ success: true, ...params });
+    } catch (error) {
+      console.error('Error creating transport:', error);
+      callback({ success: false, error: error.message });
+    }
+  });
+
+  // Connect transport
+  socket.on('connect-transport', async ({ transportId, dtlsParameters }, callback) => {
+    try {
+      await voiceManager.connectTransport(socket, { transportId, dtlsParameters });
+      callback({ success: true });
+    } catch (error) {
+      console.error('Error connecting transport:', error);
+      callback({ success: false, error: error.message });
+    }
+  });
+
+  // Produce media (audio)
+  socket.on('produce', async ({ transportId, kind, rtpParameters }, callback) => {
+    try {
+      const { producerId } = await voiceManager.produce(socket, { transportId, kind, rtpParameters });
+      callback({ success: true, producerId });
+    } catch (error) {
+      console.error('Error producing:', error);
+      callback({ success: false, error: error.message });
+    }
+  });
+
+  // Consume media (audio)
+  socket.on('consume', async ({ producerId, rtpCapabilities, transportId }, callback) => {
+    try {
+      const params = await voiceManager.consume(socket, { producerId, rtpCapabilities, transportId });
+      callback({ success: true, ...params });
+    } catch (error) {
+      console.error('Error consuming:', error);
+      callback({ success: false, error: error.message });
+    }
+  });
+
+  socket.on('leave_voice_channel', async ({ channelId }) => {
     socket.leave(channelId);
 
+    // Update UI state
     if (voiceChannelUsers.has(channelId)) {
       voiceChannelUsers.get(channelId).delete(socket.id);
       console.log(`User left voice channel ${channelId}`);
-      console.log(`Channel ${channelId} now has ${voiceChannelUsers.get(channelId).size} users`);
 
       if (voiceChannelUsers.get(channelId).size === 0) {
         voiceChannelUsers.delete(channelId);
         console.log(`Channel ${channelId} deleted (empty)`);
       }
 
-      // Broadcast ALL voice channel states to ALL clients
+      // Broadcast voice channel users update
       voiceChannelUsers.forEach((users, chId) => {
         io.emit('voice_channel_users_update', {
           channelId: chId,
@@ -264,7 +305,6 @@ io.on('connection', (socket) => {
         });
       });
 
-      // Also send empty update for the channel that was deleted
       if (!voiceChannelUsers.has(channelId)) {
         io.emit('voice_channel_users_update', {
           channelId,
@@ -273,10 +313,11 @@ io.on('connection', (socket) => {
       }
     }
 
-    socket.to(channelId).emit('user_left_voice', { socketId: socket.id });
+    // Cleanup mediasoup resources
+    await voiceManager.handleLeave(socket);
   });
 
-  // Voice speaking event
+  // Voice speaking event (for UI indicator)
   socket.on('user_speaking', ({ channelId, speaking }) => {
     io.to(channelId).emit('user_speaking_update', {
       socketId: socket.id,
@@ -284,19 +325,19 @@ io.on('connection', (socket) => {
     });
   });
 
-  // PeerJS handles signaling itself, no need for WebRTC signaling here
-
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => {
     console.log('User disconnected:', socket.id);
     onlineUsers.delete(socket.id);
     io.emit('users_update', Array.from(onlineUsers.values()));
 
-    // Remove from all voice channels
+    // Cleanup mediasoup resources
+    await voiceManager.handleLeave(socket);
+
+    // Remove from all voice channels (UI state)
     voiceChannelUsers.forEach((users, channelId) => {
       if (users.has(socket.id)) {
         users.delete(socket.id);
         console.log(`User ${socket.id} removed from voice channel ${channelId} (disconnect)`);
-        socket.to(channelId).emit('user_left_voice', { socketId: socket.id });
 
         if (users.size === 0) {
           voiceChannelUsers.delete(channelId);
@@ -305,7 +346,7 @@ io.on('connection', (socket) => {
       }
     });
 
-    // Broadcast ALL voice channel states after disconnect
+    // Broadcast voice channel states after disconnect
     voiceChannelUsers.forEach((users, chId) => {
       io.emit('voice_channel_users_update', {
         channelId: chId,

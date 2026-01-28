@@ -7,8 +7,16 @@
     "client": "cd client && npm run dev",
     "dev": "concurrently \"npm run server\" \"npm run client\""
   },
-  "keywords": ["discord", "chat", "realtime", "socketio"],
+  "keywords": [
+    "discord",
+    "chat",
+    "realtime",
+    "socketio"
+  ],
   "author": "",
   "license": "MIT",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "mediasoup-client": "^3.18.4"
+  }
 }

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import Peer from 'peerjs';
+import { Device } from 'mediasoup-client';
 import { FaVolumeMute, FaVolumeUp, FaPhoneSlash, FaMicrophone, FaMicrophoneSlash } from 'react-icons/fa';
 
 function VoiceChannel({ channel, user, socket, onLeave }) {
@@ -9,13 +9,18 @@ function VoiceChannel({ channel, user, socket, onLeave }) {
   const [speaking, setSpeaking] = useState(false);
   const [remoteSpeakingUsers, setRemoteSpeakingUsers] = useState(new Set());
 
-  const peerRef = useRef(null);
-  const connectionsRef = useRef({});
-  const userStreamRef = useRef(null);
+  // mediasoup refs
+  const deviceRef = useRef(null);
+  const sendTransportRef = useRef(null);
+  const recvTransportRef = useRef(null);
+  const producerRef = useRef(null);
+  const consumersRef = useRef(new Map()); // producerId → Consumer
+  const audioElementsRef = useRef(new Map()); // producerId → HTMLAudioElement
+
+  // Voice activity detection refs
+  const localStreamRef = useRef(null);
   const audioContextRef = useRef(null);
   const analyserRef = useRef(null);
-  const speakingTimeoutRef = useRef(null);
-  const audioElementsRef = useRef({});
 
   useEffect(() => {
     if (channel && socket) {
@@ -30,16 +35,70 @@ function VoiceChannel({ channel, user, socket, onLeave }) {
   useEffect(() => {
     if (!socket) return;
 
-    socket.on('user_joined_voice', handleUserJoinedVoice);
-    socket.on('existing_voice_users', handleExistingUsers);
-    socket.on('user_left_voice', handleUserLeftVoice);
+    const handleRouterCapabilities = async ({ rtpCapabilities }) => {
+      try {
+        // Load device with server's RTP capabilities
+        const device = new Device();
+        await device.load({ routerRtpCapabilities: rtpCapabilities });
+        deviceRef.current = device;
+
+        // Create send transport
+        await createSendTransport();
+
+        // Produce audio
+        await produceAudio();
+
+        setConnected(true);
+        console.log('✅ Connected to voice channel');
+      } catch (error) {
+        console.error('❌ Error loading device:', error);
+        alert('Sesli kanala bağlanırken hata oluştu');
+      }
+    };
+
+    const handleExistingProducers = async ({ producers }) => {
+      console.log('📋 Existing producers:', producers);
+      for (const { producerId } of producers) {
+        await consumeAudio(producerId);
+      }
+    };
+
+    const handleNewProducer = async ({ producerId, userId }) => {
+      console.log('🆕 New producer joined:', producerId, userId);
+      await consumeAudio(producerId);
+    };
+
+    const handleProducerClosed = ({ producerId }) => {
+      console.log('🔌 Producer closed:', producerId);
+
+      // Close consumer
+      const consumer = consumersRef.current.get(producerId);
+      if (consumer) {
+        consumer.close();
+        consumersRef.current.delete(producerId);
+      }
+
+      // Stop audio element
+      const audio = audioElementsRef.current.get(producerId);
+      if (audio) {
+        audio.pause();
+        audio.srcObject = null;
+        audioElementsRef.current.delete(producerId);
+      }
+    };
+
+    socket.on('router-rtp-capabilities', handleRouterCapabilities);
+    socket.on('existing-producers', handleExistingProducers);
+    socket.on('new-producer', handleNewProducer);
+    socket.on('producer-closed', handleProducerClosed);
     socket.on('voice_channel_users_update', handleVoiceUsersUpdate);
     socket.on('user_speaking_update', handleRemoteSpeaking);
 
     return () => {
-      socket.off('user_joined_voice', handleUserJoinedVoice);
-      socket.off('existing_voice_users', handleExistingUsers);
-      socket.off('user_left_voice', handleUserLeftVoice);
+      socket.off('router-rtp-capabilities', handleRouterCapabilities);
+      socket.off('existing-producers', handleExistingProducers);
+      socket.off('new-producer', handleNewProducer);
+      socket.off('producer-closed', handleProducerClosed);
       socket.off('voice_channel_users_update', handleVoiceUsersUpdate);
       socket.off('user_speaking_update', handleRemoteSpeaking);
     };
@@ -59,61 +118,224 @@ function VoiceChannel({ channel, user, socket, onLeave }) {
 
   const joinVoiceChannel = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      userStreamRef.current = stream;
+      // 1. Get microphone access
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        },
+        video: false
+      });
+      localStreamRef.current = stream;
 
-      // Setup voice activity detection
+      // 2. Setup voice activity detection
       setupVoiceActivityDetection(stream);
 
-      // Create PeerJS instance with socket.id as peer ID
-      const peer = new Peer(socket.id, {
-        config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' }
-          ]
+      // 3. Join voice channel - server will emit router-rtp-capabilities
+      socket.emit('join_voice_channel', {
+        channelId: channel.id,
+        userId: user.id
+      });
+
+      console.log('📡 Joining voice channel:', channel.id);
+
+    } catch (error) {
+      console.error('❌ Error accessing microphone:', error);
+      alert('Mikrofona erişim izni gerekli!');
+    }
+  };
+
+  const createSendTransport = async () => {
+    return new Promise((resolve, reject) => {
+      socket.emit('create-transport', {
+        channelId: channel.id,
+        direction: 'send'
+      }, async (response) => {
+        if (!response.success) {
+          console.error('❌ Failed to create send transport:', response.error);
+          return reject(response.error);
+        }
+
+        try {
+          const transport = deviceRef.current.createSendTransport({
+            id: response.id,
+            iceParameters: response.iceParameters,
+            iceCandidates: response.iceCandidates,
+            dtlsParameters: response.dtlsParameters,
+          });
+
+          // Handle 'connect' event (triggered by produce())
+          transport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+            socket.emit('connect-transport', {
+              transportId: transport.id,
+              dtlsParameters
+            }, (res) => {
+              if (res.success) {
+                callback();
+              } else {
+                errback(new Error(res.error));
+              }
+            });
+          });
+
+          // Handle 'produce' event
+          transport.on('produce', async ({ kind, rtpParameters }, callback, errback) => {
+            socket.emit('produce', {
+              transportId: transport.id,
+              kind,
+              rtpParameters
+            }, (res) => {
+              if (res.success) {
+                callback({ id: res.producerId });
+              } else {
+                errback(new Error(res.error));
+              }
+            });
+          });
+
+          sendTransportRef.current = transport;
+          console.log('✅ Send transport created');
+          resolve();
+        } catch (error) {
+          console.error('❌ Error creating send transport:', error);
+          reject(error);
+        }
+      });
+    });
+  };
+
+  const produceAudio = async () => {
+    try {
+      const audioTrack = localStreamRef.current.getAudioTracks()[0];
+
+      const producer = await sendTransportRef.current.produce({
+        track: audioTrack,
+        codecOptions: {
+          opusStereo: true,
+          opusFec: true, // Forward error correction
+          opusDtx: true, // Discontinuous transmission
         }
       });
 
-      peer.on('open', (id) => {
-        console.log('PeerJS ID:', id);
-        peerRef.current = peer;
+      producerRef.current = producer;
 
-        // Join voice channel
-        socket.emit('join_voice_channel', {
-          channelId: channel.id,
-          user: {
-            id: user.id,
-            username: user.username,
-            avatar: user.avatar
-          },
-          peerId: id
-        });
-
-        setConnected(true);
+      producer.on('transportclose', () => {
+        console.log('🔌 Producer transport closed');
       });
 
-      // Answer incoming calls
-      peer.on('call', (call) => {
-        console.log('Receiving call from:', call.peer);
-        call.answer(userStreamRef.current);
-
-        call.on('stream', (remoteStream) => {
-          console.log('Received stream from:', call.peer);
-          playAudio(call.peer, remoteStream);
-        });
-
-        connectionsRef.current[call.peer] = call;
+      producer.on('trackended', () => {
+        console.log('🎵 Audio track ended');
       });
 
-      peer.on('error', (err) => {
-        console.error('PeerJS error:', err);
-      });
-
+      console.log('✅ Audio producer created:', producer.id);
     } catch (error) {
-      console.error('Error accessing microphone:', error);
-      alert('Mikrofona erişim izni gerekli!');
+      console.error('❌ Error producing audio:', error);
+      throw error;
+    }
+  };
+
+  const createRecvTransport = async () => {
+    return new Promise((resolve, reject) => {
+      socket.emit('create-transport', {
+        channelId: channel.id,
+        direction: 'recv'
+      }, async (response) => {
+        if (!response.success) {
+          console.error('❌ Failed to create recv transport:', response.error);
+          return reject(response.error);
+        }
+
+        try {
+          const transport = deviceRef.current.createRecvTransport({
+            id: response.id,
+            iceParameters: response.iceParameters,
+            iceCandidates: response.iceCandidates,
+            dtlsParameters: response.dtlsParameters,
+          });
+
+          transport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+            socket.emit('connect-transport', {
+              transportId: transport.id,
+              dtlsParameters
+            }, (res) => {
+              if (res.success) {
+                callback();
+              } else {
+                errback(new Error(res.error));
+              }
+            });
+          });
+
+          recvTransportRef.current = transport;
+          console.log('✅ Recv transport created');
+          resolve();
+        } catch (error) {
+          console.error('❌ Error creating recv transport:', error);
+          reject(error);
+        }
+      });
+    });
+  };
+
+  const consumeAudio = async (producerId) => {
+    try {
+      // Create receive transport if not exists
+      if (!recvTransportRef.current) {
+        await createRecvTransport();
+      }
+
+      return new Promise((resolve, reject) => {
+        socket.emit('consume', {
+          producerId,
+          rtpCapabilities: deviceRef.current.rtpCapabilities,
+          transportId: recvTransportRef.current.id
+        }, async (response) => {
+          if (!response.success) {
+            console.error('❌ Failed to consume:', response.error);
+            return reject(response.error);
+          }
+
+          try {
+            const consumer = await recvTransportRef.current.consume({
+              id: response.consumerId,
+              producerId: response.producerId,
+              kind: response.kind,
+              rtpParameters: response.rtpParameters,
+            });
+
+            consumersRef.current.set(producerId, consumer);
+
+            // Play audio
+            const stream = new MediaStream([consumer.track]);
+            const audio = new Audio();
+            audio.srcObject = stream;
+            audio.autoplay = true;
+            audio.volume = 1.0;
+
+            audioElementsRef.current.set(producerId, audio);
+
+            audio.play().then(() => {
+              console.log('🔊 Playing audio from producer:', producerId);
+            }).catch(err => {
+              console.error('❌ Error playing audio:', err);
+            });
+
+            consumer.on('transportclose', () => {
+              console.log('🔌 Consumer transport closed');
+              consumer.close();
+              consumersRef.current.delete(producerId);
+            });
+
+            resolve();
+          } catch (error) {
+            console.error('❌ Error consuming audio:', error);
+            reject(error);
+          }
+        });
+      });
+    } catch (error) {
+      console.error('❌ Error in consumeAudio:', error);
     }
   };
 
@@ -187,59 +409,53 @@ function VoiceChannel({ channel, user, socket, onLeave }) {
     detectVoice();
   };
 
-  const playAudio = (peerId, stream) => {
-    let audio = audioElementsRef.current[peerId];
-    if (!audio) {
-      audio = new Audio();
-      audio.autoplay = true;
-      audio.volume = 1.0;
-      audioElementsRef.current[peerId] = audio;
-    }
-
-    audio.srcObject = stream;
-    audio.play().then(() => {
-      console.log('Audio playing from:', peerId);
-    }).catch(err => {
-      console.error('Error playing audio from', peerId, err);
-    });
-  };
-
   const leaveVoiceChannel = () => {
-    if (userStreamRef.current) {
-      userStreamRef.current.getTracks().forEach(track => track.stop());
-      userStreamRef.current = null;
+    // Stop local stream
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => track.stop());
+      localStreamRef.current = null;
     }
 
+    // Close audio context
     if (audioContextRef.current) {
       audioContextRef.current.close();
       audioContextRef.current = null;
     }
 
-    if (speakingTimeoutRef.current) {
-      clearTimeout(speakingTimeoutRef.current);
+    // Close producer
+    if (producerRef.current) {
+      producerRef.current.close();
+      producerRef.current = null;
     }
 
-    // Clean up all audio elements
-    Object.values(audioElementsRef.current).forEach(audio => {
-      if (audio) {
-        audio.srcObject = null;
-        audio.pause();
-      }
+    // Close all consumers
+    consumersRef.current.forEach(consumer => {
+      consumer.close();
     });
-    audioElementsRef.current = {};
+    consumersRef.current.clear();
 
-    // Close all connections
-    Object.values(connectionsRef.current).forEach(conn => {
-      if (conn) conn.close();
+    // Stop all audio elements
+    audioElementsRef.current.forEach(audio => {
+      audio.pause();
+      audio.srcObject = null;
     });
-    connectionsRef.current = {};
+    audioElementsRef.current.clear();
 
-    // Close peer
-    if (peerRef.current) {
-      peerRef.current.destroy();
-      peerRef.current = null;
+    // Close transports
+    if (sendTransportRef.current) {
+      sendTransportRef.current.close();
+      sendTransportRef.current = null;
     }
 
+    if (recvTransportRef.current) {
+      recvTransportRef.current.close();
+      recvTransportRef.current = null;
+    }
+
+    // Reset device
+    deviceRef.current = null;
+
+    // Notify server
     if (socket && channel) {
       socket.emit('leave_voice_channel', { channelId: channel.id });
     }
@@ -247,70 +463,7 @@ function VoiceChannel({ channel, user, socket, onLeave }) {
     setSpeaking(false);
     setRemoteSpeakingUsers(new Set());
     setConnected(false);
-  };
-
-  const handleExistingUsers = ({ users }) => {
-    console.log('Existing voice users:', users);
-    users.forEach(existingUser => {
-      if (existingUser.peerId && existingUser.peerId !== socket.id) {
-        callPeer(existingUser.peerId);
-      }
-    });
-  };
-
-  const handleUserJoinedVoice = ({ user: newUser }) => {
-    console.log('User joined voice:', newUser);
-    if (newUser.peerId && newUser.peerId !== socket.id) {
-      // Wait a bit for the new user to be ready
-      setTimeout(() => {
-        callPeer(newUser.peerId);
-      }, 1000);
-    }
-  };
-
-  const handleUserLeftVoice = ({ socketId }) => {
-    console.log('User left voice:', socketId);
-
-    // Close connection
-    if (connectionsRef.current[socketId]) {
-      connectionsRef.current[socketId].close();
-      delete connectionsRef.current[socketId];
-    }
-
-    // Clean up audio element
-    if (audioElementsRef.current[socketId]) {
-      const audio = audioElementsRef.current[socketId];
-      audio.srcObject = null;
-      delete audioElementsRef.current[socketId];
-    }
-
-    // Remove from speaking users
-    setRemoteSpeakingUsers(prev => {
-      const newSet = new Set(prev);
-      newSet.delete(socketId);
-      return newSet;
-    });
-  };
-
-  const callPeer = (peerId) => {
-    if (!peerRef.current || !userStreamRef.current) {
-      console.log('Not ready to call');
-      return;
-    }
-
-    console.log('Calling peer:', peerId);
-    const call = peerRef.current.call(peerId, userStreamRef.current);
-
-    call.on('stream', (remoteStream) => {
-      console.log('Received stream from:', peerId);
-      playAudio(peerId, remoteStream);
-    });
-
-    call.on('error', (err) => {
-      console.error('Call error with', peerId, err);
-    });
-
-    connectionsRef.current[peerId] = call;
+    console.log('👋 Left voice channel');
   };
 
   const handleVoiceUsersUpdate = ({ channelId, users }) => {
@@ -320,20 +473,21 @@ function VoiceChannel({ channel, user, socket, onLeave }) {
   };
 
   const toggleMute = () => {
-    if (userStreamRef.current) {
+    if (producerRef.current) {
       const willBeMuted = !muted;
-      userStreamRef.current.getAudioTracks().forEach(track => {
-        track.enabled = !willBeMuted;
-      });
-      setMuted(willBeMuted);
 
-      if (willBeMuted && speaking) {
-        setSpeaking(false);
-        socket.emit('user_speaking', { channelId: channel.id, speaking: false });
-        if (speakingTimeoutRef.current) {
-          clearTimeout(speakingTimeoutRef.current);
+      if (willBeMuted) {
+        producerRef.current.pause();
+        if (speaking) {
+          setSpeaking(false);
+          socket.emit('user_speaking', { channelId: channel.id, speaking: false });
         }
+      } else {
+        producerRef.current.resume();
       }
+
+      setMuted(willBeMuted);
+      console.log(willBeMuted ? '🔇 Muted' : '🔊 Unmuted');
     }
   };
 

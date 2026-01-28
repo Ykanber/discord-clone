@@ -9,12 +9,14 @@ Modern, gerçek zamanlı mesajlaşma uygulaması - Discord benzeri bir chat plat
 - ✅ Kullanıcı girişi/kayıt sistemi
 - ✅ Sunucu oluşturma ve yönetimi
 - ✅ **Metin kanalları** - Gerçek zamanlı mesajlaşma (Socket.io)
-- ✅ **Sesli kanallar** - WebRTC ile sesli sohbet (PeerJS)
+- ✅ **Sesli kanallar** - WebRTC SFU ile sesli sohbet (mediasoup)
 - ✅ **Konuşma göstergesi** - Kimin konuştuğunu görün (yeşil ring)
+- ✅ **Mobile destek** - iOS (Swift) ve Android (Kotlin) native uygulamalar
 - ✅ Çevrimiçi kullanıcı listesi
 - ✅ Modern ve responsive UI (TailwindCSS)
 - ✅ Avatar entegrasyonu (DiceBear API)
 - ✅ Sesli kanaldaki kullanıcıları görme
+- ✅ Ölçeklenebilir mimari - 100+ kullanıcı desteği
 
 ## 🛠️ Teknolojiler
 
@@ -22,15 +24,21 @@ Modern, gerçek zamanlı mesajlaşma uygulaması - Discord benzeri bir chat plat
 - Node.js
 - Express.js
 - Socket.io (gerçek zamanlı iletişim)
+- **mediasoup** (WebRTC SFU)
 - JSON dosya tabanlı veritabanı
 
-### Frontend
+### Frontend (Web)
 - React 18
 - Vite
 - TailwindCSS
 - Socket.io Client
+- **mediasoup-client** (WebRTC)
 - Axios
 - React Icons
+
+### Mobile
+- **iOS** - Swift, WebRTC, mediasoup-client-swift
+- **Android** - Kotlin, WebRTC, mediasoup-client
 
 ## 📦 Kurulum
 
