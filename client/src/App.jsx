@@ -8,7 +8,7 @@ import Chat from './components/Chat';
 import VoiceChannel from './components/VoiceChannel';
 import UserList from './components/UserList';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+const API_URL = "";
 const socket = io(API_URL);
 
 function App() {
