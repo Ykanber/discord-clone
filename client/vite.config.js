@@ -8,6 +8,8 @@ export default defineConfig({
     global: 'globalThis',
   },
   server: {
+    host: '0.0.0.0',
+    port: 5000,      
     proxy: {
       '/api': {
         target: 'http://34.79.209.41:3000',
@@ -21,5 +23,5 @@ export default defineConfig({
         secure: false,
       }
     }
-  }
+    }
 })
