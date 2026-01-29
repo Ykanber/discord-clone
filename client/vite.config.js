@@ -7,4 +7,19 @@ export default defineConfig({
   define: {
     global: 'globalThis',
   },
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://34.79.209.41:3000',
+        changeOrigin: true,
+        secure: false,
+      },
+      '/socket.io': {
+        target: 'http://34.79.209.41:3000',
+        ws: true,
+        changeOrigin: true,
+        secure: false,
+      }
+    }
+  }
 })
